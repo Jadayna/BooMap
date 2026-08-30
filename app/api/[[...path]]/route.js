@@ -9,15 +9,13 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 // ---------- Mongo ----------
-let client
-let db
+let clientPromise = null
 async function connectToMongo() {
-  if (!client) {
-    client = new MongoClient(process.env.MONGO_URL)
-    await client.connect()
-    db = client.db(process.env.DB_NAME)
+  if (!clientPromise) {
+    clientPromise = new MongoClient(process.env.MONGO_URL).connect()
   }
-  return db
+  const client = await clientPromise
+  return client.db(process.env.DB_NAME)
 }
 
 // ---------- Stripe (lazy) ----------
@@ -103,6 +101,52 @@ function isVisible(l) {
   if (l.hidden) return false
   if (l.paid) return true
   return l.trial_ends_at && new Date(l.trial_ends_at) > new Date()
+}
+
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const r = Math.PI / 180
+  const dLat = (lat2 - lat1) * r
+  const dLng = (lng2 - lng1) * r
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLng / 2) ** 2
+  return 6371 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x))
+}
+
+// Minute-by-minute simulation of "green" time today (giver local time), honouring override events + schedule
+function greenMinutesToday(listing, events) {
+  const tz = typeof listing.tz_offset === 'number' ? listing.tz_offset : 240
+  const nowLocal = new Date(Date.now() - tz * 60000)
+  const minsNow = nowLocal.getUTCHours() * 60 + nowLocal.getUTCMinutes()
+  const midnightLocalUtcMs = Date.UTC(nowLocal.getUTCFullYear(), nowLocal.getUTCMonth(), nowLocal.getUTCDate()) + tz * 60000
+  let overrideState = null
+  const todays = []
+  for (const e of events) {
+    const ts = new Date(e.at).getTime()
+    if (ts < midnightLocalUtcMs) overrideState = e.override
+    else todays.push({ min: Math.floor((ts - midnightLocalUtcMs) / 60000), override: e.override })
+  }
+  const [sh, sm] = String(listing.schedule_start || '17:00').split(':').map(Number)
+  const [eh, em] = String(listing.schedule_end || '20:00').split(':').map(Number)
+  const start = sh * 60 + (sm || 0)
+  const end = eh * 60 + (em || 0)
+  let green = 0
+  let ei = 0
+  for (let m = 0; m < minsNow; m++) {
+    while (ei < todays.length && todays[ei].min <= m) { overrideState = todays[ei].override; ei++ }
+    if (overrideState === 'active' || (overrideState === null && m >= start && m < end)) green++
+  }
+  return green
+}
+
+function weatherMeta(code) {
+  if (code === 0) return '☀️'
+  if ([1, 2, 3].includes(code)) return '⛅'
+  if ([45, 48].includes(code)) return '🌫️'
+  if ([51, 53, 55, 56, 57].includes(code)) return '🌦️'
+  if ([61, 63, 65, 66, 67].includes(code)) return '🌧️'
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return '🌨️'
+  if ([80, 81, 82].includes(code)) return '🌦️'
+  if ([95, 96, 99].includes(code)) return '⛈️'
+  return '🌡️'
 }
 
 function toPublic(l) {
@@ -290,6 +334,7 @@ async function handleRoute(request, { params }) {
       const l = await db.collection('listings').findOne({ user_id: user.id })
       if (!l) return json({ error: 'no_listing' }, 404)
       await db.collection('listings').updateOne({ id: l.id }, { $set: { manual_override: value, updated_at: new Date() } })
+      await db.collection('status_events').insertOne({ id: uuidv4(), listing_id: l.id, override: value, at: new Date() })
       const updated = await db.collection('listings').findOne({ id: l.id })
       await broadcastListingsChanged({ listingId: l.id, change: 'status', status: computeStatus(updated) })
       return json({ listing: { ...clean(updated), status: computeStatus(updated), visible: isVisible(updated) } })
@@ -336,6 +381,134 @@ async function handleRoute(request, { params }) {
       const r = data.routes && data.routes[0]
       if (!r) return json({ error: 'no_route_found' }, 404)
       return json({ geometry: r.geometry, distance_m: Math.round(r.distance), duration_s: Math.round(r.duration) })
+    }
+
+    // ============ ROUTE SHARING ============
+    if (route === '/routes/share' && method === 'POST') {
+      const body = await request.json()
+      const ids = Array.isArray(body.house_ids) ? body.house_ids.map(String).slice(0, 12) : []
+      if (ids.length < 1) return json({ error: 'no_houses' }, 400)
+      const found = await db.collection('listings').find({ id: { $in: ids } }).toArray()
+      if (found.length === 0) return json({ error: 'houses_not_found' }, 404)
+      const shared = { id: uuidv4().slice(0, 8), house_ids: ids, created_at: new Date() }
+      await db.collection('shared_routes').insertOne(shared)
+      return json({ id: shared.id })
+    }
+
+    if (route === '/routes/shared' && method === 'GET') {
+      const id = (new URL(request.url).searchParams.get('id') || '').trim()
+      if (!id) return json({ error: 'missing_id' }, 400)
+      const shared = await db.collection('shared_routes').findOne({ id })
+      if (!shared) return json({ error: 'not_found' }, 404)
+      return json({ house_ids: shared.house_ids })
+    }
+
+    // ============ STATS TRACKING (anonymous, fire-and-forget) ============
+    if (route === '/track' && method === 'POST') {
+      const body = await request.json()
+      if (body.metric !== 'route_add') return json({ error: 'invalid_metric' }, 400)
+      await db.collection('listings').updateOne({ id: String(body.listing_id || '') }, { $inc: { stats_route_adds: 1 } })
+      return json({ ok: true })
+    }
+
+    // ============ CANDY STATS NIGHT (giver recap) ============
+    if (route === '/listings/stats' && method === 'GET') {
+      const user = await getAuthUser(request, db)
+      if (!user) return json({ error: 'unauthorized' }, 401)
+      const l = await db.collection('listings').findOne({ user_id: user.id })
+      if (!l) return json({ error: 'no_listing' }, 404)
+      const events = await db.collection('status_events').find({ listing_id: l.id }).sort({ at: 1 }).limit(500).toArray()
+      const all = await db.collection('listings').find({}).limit(5000).toArray()
+      const visible = all.filter(isVisible)
+      const greenTotal = visible.filter((x) => computeStatus(x) === 'green').length
+      const neighborsGreen = visible.filter(
+        (x) => x.id !== l.id && computeStatus(x) === 'green' && haversineKm(l.lat, l.lng, x.lat, x.lng) <= 1.5
+      ).length
+      return json({
+        minutes_live_today: greenMinutesToday(l, events),
+        route_adds: l.stats_route_adds || 0,
+        neighbors_green_nearby: neighborsGreen,
+        green_total: greenTotal,
+        reports_open: await db.collection('reports').countDocuments({ listing_id: l.id, status: 'open' }),
+      })
+    }
+
+    // ============ TRICK-OR-TREAT WEATHER (Open-Meteo primary, met.no fallback — both keyless) ============
+    if (route === '/weather' && method === 'GET') {
+      const sp = new URL(request.url).searchParams
+      const lat = Number(sp.get('lat'))
+      const lng = Number(sp.get('lng'))
+      if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        return json({ error: 'invalid_coords' }, 400)
+      }
+      const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)}`
+      const cached = await db.collection('weather_cache').findOne({ key: cacheKey })
+      if (cached && Date.now() - new Date(cached.fetched_at).getTime() < 30 * 60000) {
+        return json(cached.data)
+      }
+
+      let result = null
+      // Primary: Open-Meteo (16-day horizon)
+      try {
+        const p = new URLSearchParams({
+          latitude: String(lat), longitude: String(lng),
+          daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,weather_code',
+          temperature_unit: 'celsius', wind_speed_unit: 'kmh', timezone: 'auto', forecast_days: '16',
+        })
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?${p}`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+        const body = await res.json()
+        if (res.ok && body?.daily?.time && Array.isArray(body.daily.time)) {
+          const daily = body.daily
+          const year = Number(daily.time[0].slice(0, 4))
+          const halloweenIdx = daily.time.indexOf(`${year}-10-31`)
+          const idx = halloweenIdx >= 0 ? halloweenIdx : 0
+          const code = Number(daily.weather_code?.[idx])
+          result = {
+            target_date: daily.time[idx], is_halloween: halloweenIdx >= 0,
+            tmax: daily.temperature_2m_max?.[idx], tmin: daily.temperature_2m_min?.[idx],
+            precip_prob: daily.precipitation_probability_max?.[idx], wind: daily.wind_speed_10m_max?.[idx],
+            emoji: weatherMeta(code), attribution: 'Weather data by Open-Meteo.com',
+          }
+        }
+      } catch (e) { console.error('open-meteo failed:', e.message) }
+
+      // Fallback: MET Norway locationforecast (keyless, needs identifying User-Agent)
+      if (!result) {
+        try {
+          const res = await fetch(`https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat.toFixed(4)}&lon=${lng.toFixed(4)}`, {
+            headers: { 'User-Agent': 'BooMap/1.0 halloween-trick-or-treat-map', Accept: 'application/json' },
+            cache: 'no-store',
+          })
+          const body = await res.json()
+          const series = body?.properties?.timeseries
+          if (res.ok && Array.isArray(series) && series.length) {
+            const year = series[0].time.slice(0, 4)
+            const target = series.some((s) => s.time.startsWith(`${year}-10-31`)) ? `${year}-10-31` : series[0].time.slice(0, 10)
+            const day = series.filter((s) => s.time.startsWith(target))
+            const temps = day.map((s) => s.data?.instant?.details?.air_temperature).filter((v) => typeof v === 'number')
+            const winds = day.map((s) => s.data?.instant?.details?.wind_speed).filter((v) => typeof v === 'number')
+            const precip = day.reduce((acc, s) => acc + (s.data?.next_6_hours?.details?.precipitation_amount || 0), 0)
+            const symbol = day.find((s) => s.data?.next_6_hours?.summary?.symbol_code)?.data?.next_6_hours?.summary?.symbol_code || ''
+            const emoji = /thunder/.test(symbol) ? '⛈️' : /snow|sleet/.test(symbol) ? '🌨️' : /rain|shower/.test(symbol) ? '🌧️' : /fog/.test(symbol) ? '🌫️' : /clearsky|fair/.test(symbol) ? '☀️' : '⛅'
+            result = {
+              target_date: target, is_halloween: target.endsWith('-10-31'),
+              tmax: temps.length ? Math.round(Math.max(...temps) * 10) / 10 : null,
+              tmin: temps.length ? Math.round(Math.min(...temps) * 10) / 10 : null,
+              precip_prob: precip >= 2 ? 80 : precip >= 0.2 ? 50 : 10,
+              wind: winds.length ? Math.round(Math.max(...winds) * 3.6) : null,
+              emoji, attribution: 'Weather data by MET Norway',
+            }
+          }
+        } catch (e) { console.error('met.no failed:', e.message) }
+      }
+
+      if (!result) return json({ error: 'weather_unavailable' }, 502)
+      await db.collection('weather_cache').updateOne(
+        { key: cacheKey },
+        { $set: { key: cacheKey, data: result, fetched_at: new Date() } },
+        { upsert: true }
+      )
+      return json(result)
     }
 
     // ============ REPORTS ============

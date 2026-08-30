@@ -238,3 +238,44 @@ agent_communication:
         comment: "✅ ALL ROUTE ENDPOINT TESTS PASSED (7/7): Valid 2 coords returns 200 with geometry (LineString, 68 coords), distance_m=744, duration_s=562. Valid 3 coords returns 200 with distance_m=1563 (correctly larger than 2-coord route). Error handling working: 1 coord pair → 400 invalid_coords, 13 pairs → 400 invalid_coords, garbage coords → 400 invalid_coords, out-of-range coords (200,95) → 400 invalid_coords, missing coords param → 400 invalid_coords. Sanity check: GET /listings/public working (returns 5 listings). Minor: API format changed from array to {listings:[...], server_time:...} - likely intentional for realtime feature."
   - agent: "testing"
     message: "GET /api/route endpoint testing complete: ALL 7 TESTS PASSED. Endpoint correctly handles valid 2-12 coordinate pairs, returns proper geometry (LineString), distance_m, and duration_s. All error cases validated (1 pair, 13+ pairs, garbage, out-of-range, missing param all return 400 invalid_coords). No test data created (as requested). GET /listings/public sanity check passed - note API format changed to {listings:[...], server_time:...} from previous array format, likely for realtime sync."
+  - agent: "testing"
+    message: "✅ FULL FRONTEND TESTING COMPLETE - ALL 9 SCENARIOS PASSED: Map view (hero, countdown, filters, house cards with privacy), language toggle EN/FR with persistence, route planner (2 stops, 1.3km, 14min), report flow (safety report submitted), signup + listing creation (e2e_ui_test@boomap.ca, autocomplete working, listing saved), status overrides (active/done/auto all working), payment redirect (Stripe checkout URL verified, did not complete payment), admin (login, moderation dashboard, report resolved, hide/unhide E2E listing), session persistence (reload as admin successful). Supabase realtime SUBSCRIBED. Mobile (390x844) + desktop (1920x800) tested. App is production-ready. Minor non-critical issues: chunk load failures (expected dev server restarts), some external image/style requests failed but don't affect functionality."
+  - agent: "testing"
+    message: "✅ NEW ENDPOINTS + BUG FIX TESTING COMPLETE - ALL 15 TESTS PASSED (100% success rate): Mongo connection race fix VERIFIED (5 concurrent cold-start requests all returned 200, no 'Cannot read properties of undefined' errors). Route sharing endpoints working (POST /api/routes/share creates 8-char id, GET /api/routes/shared retrieves with order preserved, proper error handling for nonexistent/empty/fake IDs). Track endpoint working (POST /api/track with route_add metric successful, invalid metric rejected). Stats endpoint working (GET /api/listings/stats returns all required fields with auth, rejects without auth). Weather endpoint working (GET /api/weather returns data from MET Norway fallback as Open-Meteo quota exceeded, 30-min Mongo cache confirmed working with 0.240s response time, invalid coords rejected). Override sanity check passed. All backend APIs fully functional. No issues found."
+
+frontend:
+  - task: "Full core flow UI: map, filters, countdown, route planner, i18n, auth, dashboard, overrides, payment redirect, admin"
+    implemented: true
+    working: true
+    file: "app/page.js, components/BooMap.js, lib/i18n.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "User approved full frontend automated testing. Mapbox + Supabase realtime active. Stripe TEST mode — verify redirect to checkout.stripe.com only, do NOT complete payment."
+      - working: true
+        agent: "testing"
+        comment: "✅ ALL 9 FRONTEND TEST SCENARIOS PASSED (mobile 390x844 + desktop 1920x800): (1) Map view anonymous - hero banner dismissible, countdown shows '61 days·2hrs·28min until Halloween', Mapbox canvas renders with colored pins (green/white/red), legend visible, 4 filter chips working (filter-green shows 4 houses, filter-all shows 5), house cards display host name + address WITHOUT street number (privacy verified: 'Rue Saint-Denis, Montréal, QC' not '4000 Rue...'), schedule + status badge visible. (2) Language toggle - EN↔FR switching works, French UI shows 'Je donne des bonbons'/'Parcours bonbons'/'avant l'Halloween', localStorage persistence verified (boomap_lang), language persists after reload. (3) Route planner - added 2 houses to route, route bar appeared showing '2 stop(s)·1.3km·~14min walk', route cleared successfully. (4) Report flow - dialog opened, selected 'safety' reason, typed comment 'E2E test safety report', submitted successfully. (5) Signup + listing creation - registered new account 'e2e_ui_test@boomap.ca' (or logged in if exists), landed on dashboard, address autocomplete working (typed '4000 rue saint-denis montreal', dropdown appeared, selected first suggestion), set schedule 17:30-20:30, candy note 'Full-size chocolate bars', saved successfully. (6) Status overrides - override-active/override-done/override-auto all working, status badge updates correctly, trial shows '3 day(s) left', pay button visible. (7) Payment redirect - clicked pay button, redirected to 'https://checkout.stripe.com/c/pay/cs_test_...' (Stripe TEST checkout), returned to app without completing payment. (8) Admin - logged out giver, logged in as admin@boomap.ca, admin dashboard visible with 'Moderation dashboard' title, resolved safety report from test 4, found 6 listings, tested hide/unhide on E2E Test House (hidden then unhidden to leave clean state). (9) Session persistence - reloaded page while logged in as admin, session persisted (still on admin view), logged out at end. Supabase realtime SUBSCRIBED (console shows '[BooMap realtime] SUBSCRIBED'). Minor: Some chunk load failures due to dev server auto-restart (expected per review request), Unsplash image requests failed (non-critical), Mapbox style requests failed (non-critical, map still renders). Desktop viewport (1920x800) screenshot captured - layout responsive."
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 3
+  run_ui: true
+
+  - task: "Route sharing + track + stats + weather endpoints, Mongo connection race fix"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js, app/page.js, lib/i18n.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "New: POST /api/routes/share, GET /api/routes/shared?id=, POST /api/track (route_add), GET /api/listings/stats (auth), GET /api/weather?lat&lng (Open-Meteo primary — currently 429 on shared IP quota, met.no fallback WORKING, 30-min Mongo cache). Also fixed connectToMongo race (promise-cached). UI verified via screenshots: shared route link loads route bar, weather card renders, stats card on dashboard."
+      - working: true
+        agent: "testing"
+        comment: "✅ ALL 15 TESTS PASSED (100% success rate): (1) BUG FIX VERIFIED - Mongo connection race fix working: restarted nextjs, fired 5 concurrent GET /api/listings/public requests, ALL returned 200 (no 500 'Cannot read properties of undefined' errors). Old errors visible in logs but new concurrent requests all succeeded. (2) ROUTE SHARING - POST /api/routes/share creates shared route with 8-char id, GET /api/routes/shared?id={id} retrieves correct house_ids with order preserved, nonexistent id returns 404, empty array returns 400 no_houses, fake IDs return 404 houses_not_found. (3) TRACK - POST /api/track with metric='route_add' returns {ok:true}, invalid metric returns 400 invalid_metric. (4) STATS - GET /api/listings/stats with Bearer token returns 200 with all required fields (minutes_live_today=44, route_adds=2, neighbors_green_nearby=2, green_total=4, reports_open=0), without token returns 401 unauthorized. (5) WEATHER - GET /api/weather?lat=45.52&lng=-73.58 returns 200 with all required fields (target_date, is_halloween, tmin=18.1, tmax=18.5, precip_prob=50, wind=17, emoji=🌧️, attribution='Weather data by MET Norway' - Open-Meteo quota exceeded as expected, fallback working), second identical call fast (0.240s) confirming 30-min Mongo cache working, invalid coords (lat=999) returns 400 invalid_coords. (6) SANITY - PATCH /api/listings/override with override=null returns 200, sets manual_override=null (auto mode), status computed correctly. All new endpoints working correctly."

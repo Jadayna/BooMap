@@ -208,8 +208,36 @@ const Countdown = ({ t }) => {
   )
 }
 
+// ---------- Costume weather card ----------
+const WeatherCard = ({ t, point }) => {
+  const [w, setW] = useState(null)
+  useEffect(() => {
+    const [lng, lat] = point || [-73.5817, 45.5231]
+    fetch(`/api/weather?lat=${lat}&lng=${lng}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.emoji) setW(d) })
+      .catch(() => {})
+  }, [point])
+  if (!w) return null
+  const tip = (w.precip_prob ?? 0) >= 50 ? t('tipRain') : (w.tmin ?? 10) <= 0 ? t('tipCold') : (w.wind ?? 0) >= 30 ? t('tipWind') : t('tipClear')
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-purple-900/60 bg-[#1e1530] px-4 py-2.5" data-testid="weather-card">
+      <div className="flex items-center gap-2.5 text-sm">
+        <span className="text-2xl">{w.emoji}</span>
+        <div>
+          <p className="font-semibold text-orange-200">
+            {w.is_halloween ? `🎃 ${t('weatherHalloweenNight')}` : t('weatherTonight')} · {w.tmin}–{w.tmax}°C
+          </p>
+          <p className="text-[11px] text-purple-300">💧 {w.precip_prob}% {t('weatherPrecip')} · 💨 {w.wind} km/h {t('weatherWind')}</p>
+        </div>
+      </div>
+      <p className="text-xs font-medium text-orange-300">{tip}</p>
+    </div>
+  )
+}
+
 // ---------- Map view ----------
-const MapView = ({ t, houses, setView, user, realtimeOn }) => {
+const MapView = ({ t, houses, setView, user, realtimeOn, initialRouteIds }) => {
   const [filter, setFilter] = useState('all')
   const [userPoint, setUserPoint] = useState(null)
   const [locating, setLocating] = useState(false)
@@ -222,7 +250,36 @@ const MapView = ({ t, houses, setView, user, realtimeOn }) => {
 
   const toggleRoute = useCallback((id) => {
     setRouteIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
-  }, [])
+    if (!routeIds.includes(id)) {
+      fetch('/api/track', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ listing_id: id, metric: 'route_add' }) }).catch(() => {})
+    }
+  }, [routeIds])
+
+  // Load a shared route arriving via /?route=<id>
+  useEffect(() => {
+    if (initialRouteIds && initialRouteIds.length) setRouteIds(initialRouteIds)
+  }, [initialRouteIds])
+
+  const shareRoute = async () => {
+    try {
+      const res = await fetch('/api/routes/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ house_ids: orderedStops.map((h) => h.id) }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error()
+      const link = `${window.location.origin}/?route=${data.id}`
+      try {
+        await navigator.clipboard.writeText(link)
+        toast.success(t('linkCopied'))
+      } catch {
+        window.prompt('🔗', link)
+      }
+    } catch {
+      toast.error(t('errGeneric'))
+    }
+  }
 
   // Greedy nearest-neighbor ordering, starting from the user's location if available
   const orderedStops = useMemo(() => {
@@ -299,6 +356,7 @@ const MapView = ({ t, houses, setView, user, realtimeOn }) => {
   return (
     <div className={`mx-auto max-w-5xl space-y-4 px-4 py-4 ${routeIds.length > 0 ? 'pb-28' : ''}`}>
       <Countdown t={t} />
+      <WeatherCard t={t} point={userPoint} />
       {heroVisible && (
         <div className="relative overflow-hidden rounded-2xl border border-purple-900/60" data-testid="hero-banner">
           <img src={HERO_IMG} alt="" className="absolute inset-0 h-full w-full object-cover" />
@@ -381,9 +439,14 @@ const MapView = ({ t, houses, setView, user, realtimeOn }) => {
                 <span className="text-purple-200" data-testid="route-summary">· {fmtDist(routeInfo.distance_m / 1000)} · ~{Math.max(1, Math.round(routeInfo.duration_s / 60))} min {t('routeWalk')}</span>
               ) : null}
             </div>
-            <Button size="sm" variant="outline" className="border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50" onClick={() => setRouteIds([])} data-testid="route-clear">
-              <X className="mr-1 h-3 w-3" />{t('clearRoute')}
-            </Button>
+            <div className="flex gap-2">
+              <Button size="sm" className="bg-orange-600 hover:bg-orange-500" onClick={shareRoute} data-testid="route-share">
+                🔗 {t('shareRoute')}
+              </Button>
+              <Button size="sm" variant="outline" className="border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50" onClick={() => setRouteIds([])} data-testid="route-clear">
+                <X className="mr-1 h-3 w-3" />{t('clearRoute')}
+              </Button>
+            </div>
           </div>
           {userPoint && <p className="mt-1 text-[11px] text-purple-400">📍 {t('routeStartNote')}</p>}
         </div>
@@ -511,6 +574,7 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [manualCoords, setManualCoords] = useState(false)
+  const [stats, setStats] = useState(null)
   const [form, setForm] = useState({
     host_name: '', address: '', lat: '', lng: '', hide_number: true,
     schedule_start: '17:00', schedule_end: '20:00', candy_note: '', photo_url: '',
@@ -538,6 +602,14 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
   }, [api])
 
   useEffect(() => { loadMine() }, [loadMine])
+
+  // Candy Stats Night
+  useEffect(() => {
+    if (!listing) return
+    api('GET', '/listings/stats').then((d) => {
+      if (d && d.minutes_live_today !== undefined) setStats(d)
+    })
+  }, [listing && listing.id, listing && listing.status]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Payment result polling (after Stripe redirect)
   useEffect(() => {
@@ -631,6 +703,32 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
                 className={!listing.manual_override ? 'bg-purple-600 hover:bg-purple-500' : 'bg-purple-900/50 text-purple-300 hover:bg-purple-800/60'}>
                 {t('overrideAuto')}
               </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {listing && stats && (
+        <Card className="border-purple-900/60 bg-[#1e1530]" data-testid="stats-card">
+          <CardContent className="space-y-3 p-5">
+            <p className="text-sm font-semibold text-purple-200">📊 {t('statsTitle')}</p>
+            <div className="grid grid-cols-2 gap-3 text-center">
+              <div className="rounded-lg bg-purple-950/40 p-3">
+                <p className="text-2xl font-bold text-orange-300" data-testid="stat-minutes">{stats.minutes_live_today}</p>
+                <p className="text-[11px] text-purple-300">🕯️ {t('statsMinutes')}</p>
+              </div>
+              <div className="rounded-lg bg-purple-950/40 p-3">
+                <p className="text-2xl font-bold text-orange-300" data-testid="stat-route-adds">{stats.route_adds}</p>
+                <p className="text-[11px] text-purple-300">🍬 {t('statsRouteAdds')}</p>
+              </div>
+              <div className="rounded-lg bg-purple-950/40 p-3">
+                <p className="text-2xl font-bold text-orange-300">{stats.neighbors_green_nearby}</p>
+                <p className="text-[11px] text-purple-300">🏘️ {t('statsNeighbors')}</p>
+              </div>
+              <div className="rounded-lg bg-purple-950/40 p-3">
+                <p className="text-2xl font-bold text-orange-300">{stats.green_total}</p>
+                <p className="text-[11px] text-purple-300">🎃 {t('statsGreenTotal')}</p>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -833,6 +931,7 @@ const App = () => {
   const [view, setView] = useState('map')
   const [houses, setHouses] = useState([])
   const [realtimeOn, setRealtimeOn] = useState(false)
+  const [sharedRouteIds, setSharedRouteIds] = useState(null)
   const [paymentSessionId, setPaymentSessionId] = useState(null)
   const t = useMemo(() => getT(lang), [lang])
 
@@ -882,6 +981,20 @@ const App = () => {
       } else if (params.get('payment') === 'cancelled') {
         toast.info(getT(savedLang === 'fr' ? 'fr' : 'en')('paymentCancelled'))
         window.history.replaceState({}, '', '/')
+      }
+      // Shared candy route link: /?route=<id>
+      const sharedId = params.get('route')
+      if (sharedId) {
+        fetch(`/api/routes/shared?id=${encodeURIComponent(sharedId)}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d && d.house_ids) {
+              setSharedRouteIds(d.house_ids)
+              toast.success(getT(savedLang === 'fr' ? 'fr' : 'en')('sharedRouteLoaded'))
+            }
+            window.history.replaceState({}, '', '/')
+          })
+          .catch(() => {})
       }
     } catch {}
   }, [])
@@ -957,7 +1070,7 @@ const App = () => {
   return (
     <div className="min-h-screen bg-[#160f23] text-orange-50">
       <Header t={t} lang={lang} setLang={setLang} user={user} setView={setView} onLogout={onLogout} />
-      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} realtimeOn={realtimeOn} />}
+      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} realtimeOn={realtimeOn} initialRouteIds={sharedRouteIds} />}
       {view === 'auth' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'dashboard' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'admin' && (user && user.role === 'admin' ? <AdminView t={t} api={api} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
