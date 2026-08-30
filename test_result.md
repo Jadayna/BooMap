@@ -209,3 +209,32 @@ agent_communication:
     message: "Initial BooMap MVP backend complete. Test via NEXT_PUBLIC_BASE_URL/api. Seed first with POST /api/seed (idempotent). Mapbox token intentionally empty (geocode 503 expected). Stripe TEST keys configured — create checkout session but do NOT pay. Use UUID ids, never Mongo ObjectID."
   - agent: "testing"
     message: "Backend testing complete: ALL 30 TESTS PASSED (100% success rate). Tested Auth (7 tests), Listings CRUD + status (8 tests), Geocode (1 test), Stripe payments (4 tests), Reports + Admin (10 tests). Fixed 2 issues during testing: (1) .env formatting bug where CORS_ORIGINS and STRIPE_SECRET_KEY were concatenated on same line, (2) Stripe Managed Payments requirement - added tax_code and automatic_tax to checkout session. All backend APIs working correctly. Ready for production."
+
+  - task: "Supabase Realtime broadcast (server push + client subscription)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js, app/page.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: true
+        agent: "main"
+        comment: "Added broadcastListingsChanged() (Supabase REST /realtime/v1/api/broadcast, topic listings:map, event listings_changed) called after listing create/update, override, admin moderation, payment paid. Client subscribes with anon key, refetches on event, adaptive polling fallback (45s subscribed / 10s not). E2E verified in browser: pin flipped within 6s of API override. Mapbox token also now active (map renders, geocode works). Regression check needed on mutation endpoints only."
+
+  - task: "Walking route endpoint (Mapbox Directions proxy) + countdown/route planner UI"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js, app/page.js, components/BooMap.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added GET /api/route?coords=lng,lat;lng,lat;... (2-12 pairs, walking profile, returns geometry/distance_m/duration_s). UI: route toggles on house cards, nearest-neighbor ordering, route line + numbered badges on map, summary bar, Halloween countdown banner. E2E browser-verified (3 stops, 2.7km, ~31min). Backend endpoint needs agent regression only for /api/route."
+      - working: true
+        agent: "testing"
+        comment: "✅ ALL ROUTE ENDPOINT TESTS PASSED (7/7): Valid 2 coords returns 200 with geometry (LineString, 68 coords), distance_m=744, duration_s=562. Valid 3 coords returns 200 with distance_m=1563 (correctly larger than 2-coord route). Error handling working: 1 coord pair → 400 invalid_coords, 13 pairs → 400 invalid_coords, garbage coords → 400 invalid_coords, out-of-range coords (200,95) → 400 invalid_coords, missing coords param → 400 invalid_coords. Sanity check: GET /listings/public working (returns 5 listings). Minor: API format changed from array to {listings:[...], server_time:...} - likely intentional for realtime feature."
+  - agent: "testing"
+    message: "GET /api/route endpoint testing complete: ALL 7 TESTS PASSED. Endpoint correctly handles valid 2-12 coordinate pairs, returns proper geometry (LineString), distance_m, and duration_s. All error cases validated (1 pair, 13+ pairs, garbage, out-of-range, missing param all return 400 invalid_coords). No test data created (as requested). GET /listings/public sanity check passed - note API format changed to {listings:[...], server_time:...} from previous array format, likely for realtime sync."

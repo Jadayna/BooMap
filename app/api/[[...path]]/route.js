@@ -30,6 +30,28 @@ function getStripe() {
 const AMOUNT_CENTS = 499 // $4.99 CAD — server-side only, never from client
 const CURRENCY = 'cad'
 
+// ---------- Supabase Realtime broadcast (notification bus only; MongoDB stays authoritative) ----------
+async function broadcastListingsChanged(payload = {}) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) return false
+  try {
+    const res = await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ topic: 'listings:map', event: 'listings_changed', payload: { ...payload, changedAt: new Date().toISOString() } }],
+      }),
+      cache: 'no-store',
+    })
+    if (!res.ok) console.error('Supabase broadcast failed:', res.status)
+    return res.ok
+  } catch (e) {
+    console.error('Supabase broadcast error:', e.message)
+    return false
+  }
+}
+
 // ---------- Helpers ----------
 function handleCORS(response) {
   response.headers.set('Access-Control-Allow-Origin', process.env.CORS_ORIGINS || '*')
@@ -246,6 +268,7 @@ async function handleRoute(request, { params }) {
       if (existing) {
         await db.collection('listings').updateOne({ id: existing.id }, { $set: fields })
         const updated = await db.collection('listings').findOne({ id: existing.id })
+        await broadcastListingsChanged({ listingId: existing.id, change: 'updated' })
         return json({ listing: { ...clean(updated), status: computeStatus(updated), visible: isVisible(updated) } })
       }
       const listing = {
@@ -255,6 +278,7 @@ async function handleRoute(request, { params }) {
         hidden: false, reported_count: 0, created_at: new Date(),
       }
       await db.collection('listings').insertOne(listing)
+      await broadcastListingsChanged({ listingId: listing.id, change: 'created' })
       return json({ listing: { ...clean(listing), status: computeStatus(listing), visible: isVisible(listing) } })
     }
 
@@ -267,6 +291,7 @@ async function handleRoute(request, { params }) {
       if (!l) return json({ error: 'no_listing' }, 404)
       await db.collection('listings').updateOne({ id: l.id }, { $set: { manual_override: value, updated_at: new Date() } })
       const updated = await db.collection('listings').findOne({ id: l.id })
+      await broadcastListingsChanged({ listingId: l.id, change: 'status', status: computeStatus(updated) })
       return json({ listing: { ...clean(updated), status: computeStatus(updated), visible: isVisible(updated) } })
     }
 
@@ -287,6 +312,30 @@ async function handleRoute(request, { params }) {
         lat: f.geometry?.coordinates?.[1],
       }))
       return json({ features })
+    }
+
+    // ============ WALKING ROUTE (Mapbox Directions proxy) ============
+    if (route === '/route' && method === 'GET') {
+      const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN
+      if (!token) return json({ error: 'mapbox_token_missing' }, 503)
+      const coordsParam = (new URL(request.url).searchParams.get('coords') || '').trim()
+      const pairs = coordsParam.split(';').filter(Boolean)
+      if (pairs.length < 2 || pairs.length > 12) return json({ error: 'invalid_coords' }, 400)
+      const coords = []
+      for (const p of pairs) {
+        const [lng, lat] = p.split(',').map(Number)
+        if (!isFinite(lng) || !isFinite(lat) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+          return json({ error: 'invalid_coords' }, 400)
+        }
+        coords.push(`${lng},${lat}`)
+      }
+      const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${coords.join(';')}?geometries=geojson&overview=full&access_token=${token}`
+      const res = await fetch(url, { cache: 'no-store' })
+      if (!res.ok) return json({ error: 'directions_failed' }, 502)
+      const data = await res.json()
+      const r = data.routes && data.routes[0]
+      if (!r) return json({ error: 'no_route_found' }, 404)
+      return json({ geometry: r.geometry, distance_m: Math.round(r.distance), duration_s: Math.round(r.duration) })
     }
 
     // ============ REPORTS ============
@@ -369,6 +418,7 @@ async function handleRoute(request, { params }) {
         const listingId = session.metadata?.listingId || (tx && tx.listing_id)
         if (listingId) {
           await db.collection('listings').updateOne({ id: listingId }, { $set: { paid: true, paid_at: new Date() } })
+          await broadcastListingsChanged({ listingId, change: 'paid' })
         }
         return json({ status: 'paid' })
       }
@@ -397,6 +447,7 @@ async function handleRoute(request, { params }) {
           )
           if (session.metadata?.listingId) {
             await db.collection('listings').updateOne({ id: session.metadata.listingId }, { $set: { paid: true, paid_at: new Date() } })
+            await broadcastListingsChanged({ listingId: session.metadata.listingId, change: 'paid' })
           }
         }
       }
@@ -427,6 +478,7 @@ async function handleRoute(request, { params }) {
       else if (body.action === 'unhide') set.hidden = false
       else return json({ error: 'invalid_action' }, 400)
       await db.collection('listings').updateOne({ id: l.id }, { $set: { ...set, updated_at: new Date() } })
+      await broadcastListingsChanged({ listingId: l.id, change: 'moderation' })
       return json({ ok: true })
     }
 

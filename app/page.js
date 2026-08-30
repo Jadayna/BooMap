@@ -139,7 +139,7 @@ const ReportDialog = ({ t, listingId, open, onClose }) => {
 }
 
 // ---------- House card ----------
-const HouseCard = ({ house, t, distance, onReport, highlight }) => (
+const HouseCard = ({ house, t, distance, onReport, highlight, inRoute, onToggleRoute }) => (
   <Card className={`overflow-hidden border-purple-900/60 bg-[#1e1530] ${highlight ? 'ring-2 ring-orange-500' : ''}`} data-testid={`house-card-${house.id}`}>
     <CardContent className="p-0">
       <div className="flex gap-3">
@@ -161,23 +161,115 @@ const HouseCard = ({ house, t, distance, onReport, highlight }) => (
             <Clock className="h-3 w-3" />{house.schedule_start}–{house.schedule_end}
             {house.candy_note && <span className="truncate text-purple-400">· 🍬 {house.candy_note}</span>}
           </p>
-          <button onClick={() => onReport(house.id)} className="self-start text-[11px] text-purple-500 underline-offset-2 hover:text-red-400 hover:underline" data-testid={`report-btn-${house.id}`}>
-            <Flag className="mr-0.5 inline h-3 w-3" />{t('report')}
-          </button>
+          <div className="flex items-center gap-3">
+            <button onClick={() => onToggleRoute(house.id)} data-testid={`route-toggle-${house.id}`}
+              className={`rounded-full border px-2 py-0.5 text-[11px] font-medium transition ${inRoute ? 'border-orange-500 bg-orange-500/20 text-orange-300' : 'border-purple-700 text-purple-300 hover:border-orange-500 hover:text-orange-300'}`}>
+              {inRoute ? `✓ ${t('removeFromRoute')}` : `➕ ${t('addToRoute')}`}
+            </button>
+            <button onClick={() => onReport(house.id)} className="text-[11px] text-purple-500 underline-offset-2 hover:text-red-400 hover:underline" data-testid={`report-btn-${house.id}`}>
+              <Flag className="mr-0.5 inline h-3 w-3" />{t('report')}
+            </button>
+          </div>
         </div>
       </div>
     </CardContent>
   </Card>
 )
 
+// ---------- Halloween countdown ----------
+const Countdown = ({ t }) => {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 30000)
+    return () => clearInterval(i)
+  }, [])
+  const d = new Date(now)
+  let target = new Date(d.getFullYear(), 9, 31) // Oct 31, local time
+  const dayAfter = new Date(d.getFullYear(), 10, 1)
+  const isToday = d >= target && d < dayAfter
+  if (d >= dayAfter) target = new Date(d.getFullYear() + 1, 9, 31)
+  const diff = Math.max(0, target - d)
+  const days = Math.floor(diff / 86400000)
+  const hours = Math.floor((diff % 86400000) / 3600000)
+  const mins = Math.floor((diff % 3600000) / 60000)
+  return (
+    <div className="flex items-center justify-center gap-2 rounded-full border border-orange-500/30 bg-gradient-to-r from-purple-900/50 via-[#241a35] to-orange-900/40 px-4 py-1.5 text-xs" data-testid="halloween-countdown">
+      {isToday ? (
+        <span className="font-semibold text-orange-300">{t('happyHalloween')}</span>
+      ) : (
+        <>
+          <span>🎃</span>
+          <span className="font-semibold text-orange-300">{days} {t('countdownDays')} · {hours} {t('countdownHours')} · {mins} {t('countdownMin')}</span>
+          <span className="text-purple-300">{t('countdownUntil')}</span>
+          <span>👻</span>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ---------- Map view ----------
-const MapView = ({ t, houses, setView, user }) => {
+const MapView = ({ t, houses, setView, user, realtimeOn }) => {
   const [filter, setFilter] = useState('all')
   const [userPoint, setUserPoint] = useState(null)
   const [locating, setLocating] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [reportId, setReportId] = useState(null)
   const [heroVisible, setHeroVisible] = useState(true)
+  const [routeIds, setRouteIds] = useState([])
+  const [routeInfo, setRouteInfo] = useState(null)
+  const [routeLoading, setRouteLoading] = useState(false)
+
+  const toggleRoute = useCallback((id) => {
+    setRouteIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
+  }, [])
+
+  // Greedy nearest-neighbor ordering, starting from the user's location if available
+  const orderedStops = useMemo(() => {
+    const sel = routeIds.map((id) => houses.find((h) => h.id === id)).filter(Boolean)
+    if (sel.length < 2) return sel
+    const remaining = [...sel]
+    const ordered = []
+    let cur = userPoint || [remaining[0].lng, remaining[0].lat]
+    if (!userPoint) ordered.push(remaining.shift())
+    while (remaining.length) {
+      let bi = 0
+      let bd = Infinity
+      remaining.forEach((h, i) => {
+        const dist = kmBetween(cur, [h.lng, h.lat]) ?? Infinity
+        if (dist < bd) { bd = dist; bi = i }
+      })
+      const next = remaining.splice(bi, 1)[0]
+      ordered.push(next)
+      cur = [next.lng, next.lat]
+    }
+    return ordered
+  }, [routeIds, houses, userPoint])
+
+  const routeKey = orderedStops.map((h) => h.id).join('|') + (userPoint ? `@${userPoint[0].toFixed(4)},${userPoint[1].toFixed(4)}` : '')
+
+  // Fetch walking directions when route composition changes
+  useEffect(() => {
+    const pts = [...(userPoint ? [userPoint] : []), ...orderedStops.map((h) => [h.lng, h.lat])]
+    if (pts.length < 2) { setRouteInfo(null); setRouteLoading(false); return }
+    let cancelled = false
+    setRouteLoading(true)
+    const timer = setTimeout(async () => {
+      try {
+        const coords = pts.map((p) => `${p[0]},${p[1]}`).join(';')
+        const res = await fetch(`/api/route?coords=${encodeURIComponent(coords)}`)
+        const data = await res.json()
+        if (!cancelled) setRouteInfo(res.ok ? data : null)
+      } catch {
+        if (!cancelled) setRouteInfo(null)
+      } finally {
+        if (!cancelled) setRouteLoading(false)
+      }
+    }, 400)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [routeKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stopMarkers = useMemo(() => orderedStops.map((h, i) => ({ lng: h.lng, lat: h.lat, seq: i + 1 })), [orderedStops])
 
   const filtered = useMemo(() => (filter === 'all' ? houses : houses.filter((h) => h.status === filter)), [houses, filter])
   const sorted = useMemo(() => {
@@ -205,7 +297,8 @@ const MapView = ({ t, houses, setView, user }) => {
   ]
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4 px-4 py-4">
+    <div className={`mx-auto max-w-5xl space-y-4 px-4 py-4 ${routeIds.length > 0 ? 'pb-28' : ''}`}>
+      <Countdown t={t} />
       {heroVisible && (
         <div className="relative overflow-hidden rounded-2xl border border-purple-900/60" data-testid="hero-banner">
           <img src={HERO_IMG} alt="" className="absolute inset-0 h-full w-full object-cover" />
@@ -238,8 +331,8 @@ const MapView = ({ t, houses, setView, user }) => {
           </button>
         ))}
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden items-center gap-1 text-[11px] text-green-400 sm:flex">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />{t('updatedLive')}
+          <span className={`hidden items-center gap-1 text-[11px] sm:flex ${realtimeOn ? 'text-green-400' : 'text-purple-400'}`} data-testid="live-indicator">
+            <span className={`h-1.5 w-1.5 animate-pulse rounded-full ${realtimeOn ? 'bg-green-400' : 'bg-purple-400'}`} />{t('updatedLive')}
           </span>
           <Button size="sm" variant="outline" className="border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50" onClick={locate} disabled={locating} data-testid="near-me-btn">
             <Navigation className="mr-1 h-3.5 w-3.5" />{locating ? t('locating') : t('nearMe')}
@@ -247,7 +340,8 @@ const MapView = ({ t, houses, setView, user }) => {
         </div>
       </div>
 
-      <BooMap houses={filtered} userPoint={userPoint} onSelect={setSelectedId} fallbackText={t('mapTokenMissing')} />
+      <BooMap houses={filtered} userPoint={userPoint} onSelect={setSelectedId} fallbackText={t('mapTokenMissing')}
+        routeGeo={routeInfo ? routeInfo.geometry : null} routeStops={stopMarkers} />
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-purple-300">
         <span className="font-semibold uppercase tracking-wide text-purple-400">{t('legend')}:</span>
@@ -255,6 +349,7 @@ const MapView = ({ t, houses, setView, user }) => {
         <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-green-500" />{t('legendGreen')}</span>
         <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-red-500" />{t('legendRed')}</span>
       </div>
+      {routeIds.length === 0 && <p className="text-[11px] text-purple-500">🍬 {t('routeHint')}</p>}
 
       <div className="space-y-2">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-orange-200">
@@ -265,12 +360,34 @@ const MapView = ({ t, houses, setView, user }) => {
           {sorted.map((h) => (
             <HouseCard key={h.id} house={h} t={t} highlight={selectedId === h.id}
               distance={userPoint ? fmtDist(kmBetween(userPoint, [h.lng, h.lat])) : null}
+              inRoute={routeIds.includes(h.id)} onToggleRoute={toggleRoute}
               onReport={setReportId} />
           ))}
         </div>
       </div>
 
       {reportId && <ReportDialog t={t} listingId={reportId} open={!!reportId} onClose={() => setReportId(null)} />}
+
+      {routeIds.length > 0 && (
+        <div className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-xl rounded-xl border border-orange-500/40 bg-[#241a35]/95 p-3 shadow-2xl backdrop-blur" data-testid="route-bar">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-orange-200">
+              <span>🍬</span>
+              <span className="font-semibold">{t('routePlanner')}:</span>
+              <span data-testid="route-stop-count">{orderedStops.length} {t('routeStops')}</span>
+              {routeLoading ? (
+                <span className="text-xs text-purple-300">{t('routeLoading')}</span>
+              ) : routeInfo ? (
+                <span className="text-purple-200" data-testid="route-summary">· {fmtDist(routeInfo.distance_m / 1000)} · ~{Math.max(1, Math.round(routeInfo.duration_s / 60))} min {t('routeWalk')}</span>
+              ) : null}
+            </div>
+            <Button size="sm" variant="outline" className="border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50" onClick={() => setRouteIds([])} data-testid="route-clear">
+              <X className="mr-1 h-3 w-3" />{t('clearRoute')}
+            </Button>
+          </div>
+          {userPoint && <p className="mt-1 text-[11px] text-purple-400">📍 {t('routeStartNote')}</p>}
+        </div>
+      )}
     </div>
   )
 }
@@ -715,6 +832,7 @@ const App = () => {
   const [user, setUser] = useState(null)
   const [view, setView] = useState('map')
   const [houses, setHouses] = useState([])
+  const [realtimeOn, setRealtimeOn] = useState(false)
   const [paymentSessionId, setPaymentSessionId] = useState(null)
   const t = useMemo(() => getT(lang), [lang])
 
@@ -768,9 +886,12 @@ const App = () => {
     } catch {}
   }, [])
 
-  // Live sync: poll public listings (interim until Supabase Realtime creds are provided)
+  // Live sync: Supabase Realtime broadcast (instant) + adaptive polling fallback
   useEffect(() => {
     let active = true
+    let interval = null
+    let supabase = null
+    let channel = null
     const load = async () => {
       try {
         const res = await fetch('/api/listings/public', { cache: 'no-store' })
@@ -778,11 +899,39 @@ const App = () => {
         if (active && data && data.listings) setHouses(data.listings)
       } catch {}
     }
+    const setPoll = (ms) => {
+      if (interval) clearInterval(interval)
+      interval = setInterval(load, ms)
+    }
     load()
-    const interval = setInterval(load, 10000)
+    setPoll(10000)
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (url && anon) {
+      import('@supabase/supabase-js')
+        .then(({ createClient }) => {
+          if (!active) return
+          supabase = createClient(url, anon, { auth: { persistSession: false } })
+          channel = supabase
+            .channel('listings:map')
+            .on('broadcast', { event: 'listings_changed' }, () => { load() })
+            .subscribe((status) => {
+              if (!active) return
+              console.log('[BooMap realtime]', status)
+              if (status === 'SUBSCRIBED') { setRealtimeOn(true); setPoll(45000) }
+              else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') { setRealtimeOn(false); setPoll(10000) }
+            })
+        })
+        .catch(() => {})
+    }
     const onFocus = () => load()
     window.addEventListener('focus', onFocus)
-    return () => { active = false; clearInterval(interval); window.removeEventListener('focus', onFocus) }
+    return () => {
+      active = false
+      if (interval) clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+      if (supabase && channel) supabase.removeChannel(channel)
+    }
   }, [])
 
   const onAuthed = (newToken, newUser) => {
@@ -808,7 +957,7 @@ const App = () => {
   return (
     <div className="min-h-screen bg-[#160f23] text-orange-50">
       <Header t={t} lang={lang} setLang={setLang} user={user} setView={setView} onLogout={onLogout} />
-      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} />}
+      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} realtimeOn={realtimeOn} />}
       {view === 'auth' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'dashboard' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'admin' && (user && user.role === 'admin' ? <AdminView t={t} api={api} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}

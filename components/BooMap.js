@@ -17,15 +17,37 @@ function toGeoJSON(houses) {
   }
 }
 
-export default function BooMap({ houses, userPoint, onSelect, fallbackText }) {
+function applyRoute(map, routeGeo, routeStops) {
+  const lineSrc = map.getSource('booroute')
+  const stopSrc = map.getSource('booroute-stops')
+  if (lineSrc) {
+    lineSrc.setData(routeGeo
+      ? { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: routeGeo, properties: {} }] }
+      : { type: 'FeatureCollection', features: [] })
+  }
+  if (stopSrc) {
+    stopSrc.setData({
+      type: 'FeatureCollection',
+      features: (routeStops || []).map((s) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
+        properties: { seq: s.seq },
+      })),
+    })
+  }
+}
+
+export default function BooMap({ houses, userPoint, onSelect, fallbackText, routeGeo, routeStops }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
   const loadedRef = useRef(false)
   const onSelectRef = useRef(onSelect)
   const userMarkerRef = useRef(null)
+  const routeRef = useRef({ routeGeo, routeStops })
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN
 
   useEffect(() => { onSelectRef.current = onSelect }, [onSelect])
+  useEffect(() => { routeRef.current = { routeGeo, routeStops } }, [routeGeo, routeStops])
 
   // Init map once
   useEffect(() => {
@@ -47,6 +69,14 @@ export default function BooMap({ houses, userPoint, onSelect, fallbackText }) {
         cluster: true,
         clusterMaxZoom: 14,
         clusterRadius: 50,
+      })
+      // Candy route sources/layers (line under pins, numbered badges above)
+      map.addSource('booroute', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      map.addSource('booroute-stops', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      map.addLayer({
+        id: 'route-line', type: 'line', source: 'booroute',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#f97316', 'line-width': 4, 'line-opacity': 0.85, 'line-dasharray': [0.5, 1.6] },
       })
       map.addLayer({
         id: 'clusters', type: 'circle', source: 'boohouses',
@@ -86,12 +116,29 @@ export default function BooMap({ houses, userPoint, onSelect, fallbackText }) {
         const p = e.features[0]
         if (onSelectRef.current) onSelectRef.current(p.properties.id)
       })
+      // Numbered route stop badges (offset above the pin)
+      map.addLayer({
+        id: 'route-stop-badges', type: 'circle', source: 'booroute-stops',
+        paint: {
+          'circle-color': '#f97316',
+          'circle-radius': 9,
+          'circle-stroke-color': '#1e1b2e',
+          'circle-stroke-width': 2,
+          'circle-translate': [0, -22],
+        },
+      })
+      map.addLayer({
+        id: 'route-stop-numbers', type: 'symbol', source: 'booroute-stops',
+        layout: { 'text-field': ['to-string', ['get', 'seq']], 'text-size': 12, 'text-offset': [0, -1.85], 'text-allow-overlap': true },
+        paint: { 'text-color': '#ffffff' },
+      })
       for (const layer of ['clusters', 'house-points']) {
         map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer' })
         map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = '' })
       }
       loadedRef.current = true
       map.getSource('boohouses').setData(toGeoJSON(houses))
+      applyRoute(map, routeRef.current.routeGeo, routeRef.current.routeStops)
     })
 
     return () => { map.remove(); mapRef.current = null; loadedRef.current = false }
@@ -106,6 +153,12 @@ export default function BooMap({ houses, userPoint, onSelect, fallbackText }) {
       if (src) src.setData(toGeoJSON(houses))
     }
   }, [houses])
+
+  // Candy route updates
+  useEffect(() => {
+    const map = mapRef.current
+    if (map && loadedRef.current) applyRoute(map, routeGeo, routeStops)
+  }, [routeGeo, routeStops])
 
   // User location marker
   useEffect(() => {
