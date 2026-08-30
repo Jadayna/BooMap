@@ -557,6 +557,7 @@ async function handleRoute(request, { params }) {
         cancel_url: `${base}/?payment=cancelled`,
         metadata: { userId: user.id, listingId: listing.id, integration: 'boomap-seasonal-pass' },
         automatic_tax: { enabled: true },
+        allow_promotion_codes: true,
       })
 
       await db.collection('payment_transactions').updateOne(

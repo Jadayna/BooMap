@@ -279,3 +279,21 @@ metadata:
       - working: true
         agent: "testing"
         comment: "✅ ALL 15 TESTS PASSED (100% success rate): (1) BUG FIX VERIFIED - Mongo connection race fix working: restarted nextjs, fired 5 concurrent GET /api/listings/public requests, ALL returned 200 (no 500 'Cannot read properties of undefined' errors). Old errors visible in logs but new concurrent requests all succeeded. (2) ROUTE SHARING - POST /api/routes/share creates shared route with 8-char id, GET /api/routes/shared?id={id} retrieves correct house_ids with order preserved, nonexistent id returns 404, empty array returns 400 no_houses, fake IDs return 404 houses_not_found. (3) TRACK - POST /api/track with metric='route_add' returns {ok:true}, invalid metric returns 400 invalid_metric. (4) STATS - GET /api/listings/stats with Bearer token returns 200 with all required fields (minutes_live_today=44, route_adds=2, neighbors_green_nearby=2, green_total=4, reports_open=0), without token returns 401 unauthorized. (5) WEATHER - GET /api/weather?lat=45.52&lng=-73.58 returns 200 with all required fields (target_date, is_halloween, tmin=18.1, tmax=18.5, precip_prob=50, wind=17, emoji=🌧️, attribution='Weather data by MET Norway' - Open-Meteo quota exceeded as expected, fallback working), second identical call fast (0.240s) confirming 30-min Mongo cache working, invalid coords (lat=999) returns 400 invalid_coords. (6) SANITY - PATCH /api/listings/override with override=null returns 200, sets manual_override=null (auto mode), status computed correctly. All new endpoints working correctly."
+
+  - task: "Stripe promo codes + Neighborhood Alerts + Giver Reminders"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js, app/page.js, lib/i18n.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: "Added allow_promotion_codes:true to checkout session (user manages codes in Stripe dashboard; still TEST keys — live keys not provided). Frontend: alerts bell toggle (browser-verified: toast fired on green flip via realtime), giver reminder 1h before window (browser-verified: toast + dashboard banner). Backend needs: verify checkout session has allow_promotion_codes=true via Stripe retrieve."
+      - working: true
+        agent: "testing"
+        comment: "✅ ALL 5 TESTS PASSED (100% success rate): (1) Login as demo@boomap.ca successful, token received. (2) POST /payments/checkout with Bearer token returns 200 with {url: 'https://checkout.stripe.com/...', session_id: 'cs_test_...'} - session_id correctly starts with cs_test_. (3) Retrieved checkout session directly from Stripe API (GET https://api.stripe.com/v1/checkout/sessions/{session_id} with Bearer STRIPE_SECRET_KEY) - VERIFIED allow_promotion_codes=true, mode=payment, amount_subtotal=499 CAD cents, amount_total=499, currency=cad. (4) Sanity: GET /listings/public returns 200 with 6 listings. (5) Sanity: GET /listings/mine with demo token returns 200, schedule_start=17:00, schedule_end=20:30, manual_override=null. Stripe promo code feature working correctly."
+
+  - agent: "testing"
+    message: "✅ STRIPE PROMO CODE VERIFICATION COMPLETE - ALL 5 TESTS PASSED (100% success rate): Verified new allow_promotion_codes feature via direct Stripe API call. (1) Login as demo@boomap.ca successful. (2) POST /payments/checkout returns checkout session with cs_test_ prefix. (3) Retrieved session from Stripe API using STRIPE_SECRET_KEY - CONFIRMED allow_promotion_codes=true, mode=payment, amount_subtotal=499 CAD cents, amount_total=499, currency=cad. (4-5) Sanity checks passed: GET /listings/public returns 6 listings, GET /listings/mine returns demo listing with schedule 17:00-20:30 and manual_override=null. Stripe promo code feature fully functional."

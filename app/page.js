@@ -13,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { toast } from 'sonner'
-import { MapPin, Ghost, Globe, LogOut, Clock, Navigation, Flag, ShieldCheck, Camera, X, Candy, Sparkles, CreditCard } from 'lucide-react'
+import { MapPin, Ghost, Globe, LogOut, Clock, Navigation, Flag, ShieldCheck, Camera, X, Candy, Sparkles, CreditCard, Bell, BellRing } from 'lucide-react'
 
 const BooMap = dynamic(() => import('@/components/BooMap'), { ssr: false })
 
@@ -237,9 +237,8 @@ const WeatherCard = ({ t, point }) => {
 }
 
 // ---------- Map view ----------
-const MapView = ({ t, houses, setView, user, realtimeOn, initialRouteIds }) => {
+const MapView = ({ t, houses, setView, user, realtimeOn, initialRouteIds, userPoint, setUserPoint, alertsEnabled, onToggleAlerts }) => {
   const [filter, setFilter] = useState('all')
-  const [userPoint, setUserPoint] = useState(null)
   const [locating, setLocating] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [reportId, setReportId] = useState(null)
@@ -392,6 +391,14 @@ const MapView = ({ t, houses, setView, user, realtimeOn, initialRouteIds }) => {
           <span className={`hidden items-center gap-1 text-[11px] sm:flex ${realtimeOn ? 'text-green-400' : 'text-purple-400'}`} data-testid="live-indicator">
             <span className={`h-1.5 w-1.5 animate-pulse rounded-full ${realtimeOn ? 'bg-green-400' : 'bg-purple-400'}`} />{t('updatedLive')}
           </span>
+          <Button size="sm" variant="outline" data-testid="alerts-toggle"
+            className={alertsEnabled
+              ? 'border-orange-500 bg-orange-500/20 text-orange-300 hover:bg-orange-500/30'
+              : 'border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50'}
+            onClick={() => { onToggleAlerts(); if (!alertsEnabled && !userPoint) locate() }}>
+            {alertsEnabled ? <BellRing className="mr-1 h-3.5 w-3.5" /> : <Bell className="mr-1 h-3.5 w-3.5" />}
+            {alertsEnabled ? t('alertsOn') : t('alertsOff')}
+          </Button>
           <Button size="sm" variant="outline" className="border-purple-700 bg-transparent text-purple-200 hover:bg-purple-900/50" onClick={locate} disabled={locating} data-testid="near-me-btn">
             <Navigation className="mr-1 h-3.5 w-3.5" />{locating ? t('locating') : t('nearMe')}
           </Button>
@@ -575,6 +582,11 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
   const [busy, setBusy] = useState(false)
   const [manualCoords, setManualCoords] = useState(false)
   const [stats, setStats] = useState(null)
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const i = setInterval(() => setTick((x) => x + 1), 60000)
+    return () => clearInterval(i)
+  }, [])
   const [form, setForm] = useState({
     host_name: '', address: '', lat: '', lng: '', hide_number: true,
     schedule_start: '17:00', schedule_end: '20:00', candy_note: '', photo_url: '',
@@ -678,6 +690,15 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
   const trialDaysLeft = listing ? Math.max(0, Math.ceil((new Date(listing.trial_ends_at) - Date.now()) / 86400000)) : 3
   const trialExpired = listing && !listing.paid && new Date(listing.trial_ends_at) < new Date()
 
+  // Giver reminder banner: giving window opens within the next hour (auto mode only)
+  let minsUntilStart = null
+  if (listing && !listing.manual_override) {
+    const [sh, sm] = String(listing.schedule_start || '17:00').split(':').map(Number)
+    const nowD = new Date()
+    const until = sh * 60 + (sm || 0) - (nowD.getHours() * 60 + nowD.getMinutes())
+    if (until > 0 && until <= 60) minsUntilStart = until
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-4 px-4 py-6">
       <h1 className="text-2xl text-orange-300" style={{ fontFamily: 'Creepster, cursive' }}>{t('myHouseTitle')}</h1>
@@ -690,6 +711,11 @@ const DashboardView = ({ t, api, paymentSessionId, onPaymentHandled }) => {
               <StatusBadge status={listing.status} t={t} />
             </div>
             <p className="text-xs text-purple-400">{t('autoModeNote')} ({listing.schedule_start}–{listing.schedule_end})</p>
+            {minsUntilStart !== null && (
+              <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 p-2.5 text-xs text-yellow-300" data-testid="reminder-banner">
+                ⏰ {t('reminderBody')} <strong>{minsUntilStart} min</strong> — {t('reminderNote')} {listing.schedule_start}.
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               <Button size="sm" onClick={() => setOverride('active')} data-testid="override-active"
                 className={listing.manual_override === 'active' ? 'bg-green-600 hover:bg-green-500' : 'bg-green-900/50 text-green-300 hover:bg-green-800/60'}>
@@ -932,10 +958,94 @@ const App = () => {
   const [houses, setHouses] = useState([])
   const [realtimeOn, setRealtimeOn] = useState(false)
   const [sharedRouteIds, setSharedRouteIds] = useState(null)
+  const [userPoint, setUserPoint] = useState(null)
+  const [alertsEnabled, setAlertsEnabled] = useState(false)
+  const prevStatusRef = useRef(null)
+  const alertsRef = useRef(false)
+  const userPointRef = useRef(null)
+  const myListingRef = useRef(null)
   const [paymentSessionId, setPaymentSessionId] = useState(null)
   const t = useMemo(() => getT(lang), [lang])
 
   const setLang = (l) => { setLangState(l); try { localStorage.setItem('boomap_lang', l) } catch {} }
+
+  useEffect(() => { alertsRef.current = alertsEnabled }, [alertsEnabled])
+  useEffect(() => { userPointRef.current = userPoint }, [userPoint])
+
+  const onToggleAlerts = () => {
+    const next = !alertsEnabled
+    setAlertsEnabled(next)
+    try { localStorage.setItem('boomap_alerts', next ? '1' : '0') } catch {}
+    if (next) {
+      toast.success(t('alertsEnabledToast'))
+      try {
+        if (typeof Notification !== 'undefined' && Notification.permission === 'default') Notification.requestPermission()
+      } catch {}
+    }
+  }
+
+  // Neighborhood Alerts: ping when a house flips to green (within 2 km if location known)
+  useEffect(() => {
+    const prev = prevStatusRef.current
+    const current = {}
+    houses.forEach((h) => { current[h.id] = h.status })
+    prevStatusRef.current = current
+    if (!prev || !alertsRef.current) return
+    const newlyGreen = houses.filter((h) => h.status === 'green' && prev[h.id] !== 'green' && h.id in prev)
+    for (const h of newlyGreen.slice(0, 3)) {
+      let suffix = ''
+      const up = userPointRef.current
+      if (up) {
+        const km = kmBetween(up, [h.lng, h.lat])
+        if (km == null || km > 2) continue
+        suffix = ` (${fmtDist(km)})`
+      }
+      const msg = `🍬 ${h.host_name} ${t('alertNearbyGiving')}${suffix}`
+      toast.success(msg, { duration: 8000 })
+      try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]) } catch {}
+      try {
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          new Notification('BooMap 🎃', { body: msg })
+        }
+      } catch {}
+    }
+  }, [houses]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Giver Reminders: heads-up 1 hour before the giving window opens (once per day)
+  useEffect(() => {
+    if (!user || user.role !== 'giver' || !token) return
+    let stop = false
+    const check = async () => {
+      if (stop) return
+      if (!myListingRef.current) {
+        const d = await api('GET', '/listings/mine')
+        if (d && d.listing) myListingRef.current = d.listing
+        else return
+      }
+      const l = myListingRef.current
+      if (!l || l.manual_override) return
+      const [sh, sm] = String(l.schedule_start || '17:00').split(':').map(Number)
+      const now = new Date()
+      const until = sh * 60 + (sm || 0) - (now.getHours() * 60 + now.getMinutes())
+      if (until > 0 && until <= 60) {
+        const key = `boomap_reminded_${now.toDateString()}`
+        try {
+          if (localStorage.getItem(key)) return
+          localStorage.setItem(key, '1')
+        } catch {}
+        const msg = `⏰ ${t('reminderBody')} ${until} min ! ${t('reminderNote')} ${l.schedule_start}.`
+        toast.info(msg, { duration: 12000 })
+        try {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            new Notification(`BooMap — ${t('reminderTitle')} 🎃`, { body: msg })
+          }
+        } catch {}
+      }
+    }
+    check()
+    const i = setInterval(check, 60000)
+    return () => { stop = true; clearInterval(i) }
+  }, [user, token]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const api = useCallback(async (method, path, body) => {
     try {
@@ -958,6 +1068,7 @@ const App = () => {
     try {
       const savedLang = localStorage.getItem('boomap_lang')
       if (savedLang === 'fr' || savedLang === 'en') setLangState(savedLang)
+      if (localStorage.getItem('boomap_alerts') === '1') setAlertsEnabled(true)
       const savedToken = localStorage.getItem('boomap_token')
       if (savedToken) {
         setToken(savedToken)
@@ -1058,6 +1169,7 @@ const App = () => {
   const onLogout = () => {
     setToken(null)
     setUser(null)
+    myListingRef.current = null
     try { localStorage.removeItem('boomap_token') } catch {}
     setView('map')
   }
@@ -1070,7 +1182,8 @@ const App = () => {
   return (
     <div className="min-h-screen bg-[#160f23] text-orange-50">
       <Header t={t} lang={lang} setLang={setLang} user={user} setView={setView} onLogout={onLogout} />
-      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} realtimeOn={realtimeOn} initialRouteIds={sharedRouteIds} />}
+      {view === 'map' && <MapView t={t} houses={houses} setView={setView} user={user} realtimeOn={realtimeOn} initialRouteIds={sharedRouteIds}
+        userPoint={userPoint} setUserPoint={setUserPoint} alertsEnabled={alertsEnabled} onToggleAlerts={onToggleAlerts} />}
       {view === 'auth' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'dashboard' && (user ? <DashboardView t={t} api={api} paymentSessionId={paymentSessionId} onPaymentHandled={onPaymentHandled} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
       {view === 'admin' && (user && user.role === 'admin' ? <AdminView t={t} api={api} /> : <AuthView t={t} lang={lang} onAuthed={onAuthed} />)}
