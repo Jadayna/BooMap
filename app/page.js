@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { toast } from 'sonner'
 import { MapPin, Ghost, Globe, LogOut, Clock, Navigation, Flag, ShieldCheck, Camera, X, Candy, Sparkles, CreditCard, Bell, BellRing } from 'lucide-react'
+import InstallButton from '@/components/InstallButton'
 
 const BooMap = dynamic(() => import('@/components/BooMap'), { ssr: false })
 
@@ -55,6 +56,7 @@ const Header = ({ t, lang, setLang, user, setView, onLogout }) => (
         </span>
       </button>
       <div className="flex items-center gap-1.5">
+        <InstallButton />
         <Button variant="ghost" size="sm" className="text-purple-200 hover:bg-purple-900/40 hover:text-orange-300" onClick={() => setLang(lang === 'en' ? 'fr' : 'en')} data-testid="lang-toggle">
           <Globe className="mr-1 h-4 w-4" />
           {lang === 'en' ? 'FR' : 'EN'}
