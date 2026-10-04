@@ -667,7 +667,13 @@ async function handleRoute(request, { params }) {
     }
 
     // ============ SEED ============
+    // Protégé en prod : définir SEED_SECRET et l'envoyer en header x-seed-secret.
+    // Sans SEED_SECRET (dev local), l'endpoint reste ouvert.
     if (route === '/seed' && method === 'POST') {
+      const seedSecret = process.env.SEED_SECRET
+      if (seedSecret && request.headers.get('x-seed-secret') !== seedSecret) {
+        return json({ error: 'forbidden' }, 403)
+      }
       const result = await seedDatabase(db)
       return json({ ok: true, ...result })
     }
